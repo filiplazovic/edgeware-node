@@ -13,9 +13,9 @@ extern crate substrate_client as client;
 extern crate srml_support;
 #[macro_use]
 extern crate sr_primitives as runtime_primitives;
-#[cfg(feature = "std")]
-#[macro_use]
-extern crate serde_derive;
+
+extern crate substrate_primitives;
+
 extern crate parity_codec;
 extern crate substrate_primitives as primitives;
 #[macro_use]
@@ -28,96 +28,72 @@ extern crate edge_identity;
 extern crate srml_aura as aura;
 extern crate srml_balances as balances;
 extern crate srml_consensus as consensus;
+extern crate srml_contract as contract;
+extern crate srml_council as council;
+extern crate srml_democracy as democracy;
 extern crate srml_executive as executive;
+extern crate srml_grandpa as grandpa;
 extern crate srml_session as session;
+extern crate srml_staking as staking;
+extern crate srml_treasury as treasury;
+
 extern crate srml_system as system;
 extern crate srml_timestamp as timestamp;
 extern crate srml_upgrade_key as upgrade_key;
-extern crate substrate_consensus_aura_primitives as consensus_aura;
 
 use edge_delegation::delegation;
 use edge_governance::governance;
 use edge_identity::identity;
+use primitives::OpaqueMetadata;
 
-use client::{block_builder::api as block_builder_api, runtime_api};
+extern crate node_primitives;
+extern crate substrate_consensus_aura_primitives as consensus_aura;
+
+use client::{block_builder::api as block_builder_api, runtime_api as client_api};
 use consensus_aura::api as aura_api;
+
 #[cfg(feature = "std")]
-use primitives::bytes;
-use primitives::{AuthorityId, OpaqueMetadata};
-use rstd::prelude::*;
-use runtime_primitives::{
-    generic,
-    traits::{self, BlakeTwo256, Block as BlockT, Convert, ProvideInherent},
-    transaction_validity::TransactionValidity,
-    ApplyResult, BasicInherentData, CheckInherentError, Ed25519Signature,
+use council::seats as council_seats;
+use council::{motions as council_motions, voting as council_voting};
+use grandpa::fg_primitives::{self, ScheduledChange};
+use node_primitives::{
+    AccountId, AccountIndex, Balance, BlockNumber, Hash, Index, SessionKey, Signature,
 };
-#[cfg(feature = "std")]
+use rstd::prelude::*;
+use runtime_primitives::generic;
+use runtime_primitives::traits::{
+    BlakeTwo256, Block as BlockT, Convert, DigestFor, NumberFor, ProvideInherent,
+};
+use runtime_primitives::transaction_validity::TransactionValidity;
+use runtime_primitives::{ApplyResult, BasicInherentData, CheckInherentError};
+use substrate_primitives::u32_trait::{_2, _4};
+#[cfg(any(feature = "std", test))]
 use version::NativeVersion;
 use version::RuntimeVersion;
 
-// A few exports that help ease life for downstream crates.
 pub use balances::Call as BalancesCall;
 pub use consensus::Call as ConsensusCall;
 #[cfg(any(feature = "std", test))]
 pub use runtime_primitives::BuildStorage;
 pub use runtime_primitives::{Perbill, Permill};
 pub use srml_support::{RuntimeMetadata, StorageValue};
-pub use timestamp::BlockPeriod;
 pub use timestamp::Call as TimestampCall;
 
-/// Alias to Ed25519 pubkey that identifies an account on the chain.
-pub type AccountId = primitives::H256;
+const TIMESTAMP_SET_POSITION: u32 = 0;
+const NOTE_OFFLINE_POSITION: u32 = 1;
 
-/// A hash of some data used by the chain.
-pub type Hash = primitives::H256;
-
-/// Index of a block number in the chain.
-pub type BlockNumber = u64;
-
-/// Index of an account's extrinsic in the chain.
-pub type Nonce = u64;
-
-pub type SessionKey = AuthorityId;
-
-/// Opaque types. These are used by the CLI to instantiate machinery that don't need to know
-/// the specifics of the runtime. They can then be made to be agnostic over specific formats
-/// of data like extrinsics, allowing for them to continue syncing the network through upgrades
-/// to even the core datastructures.
-pub mod opaque {
-    use super::*;
-
-    /// Opaque, encoded, unchecked extrinsic.
-    #[derive(PartialEq, Eq, Clone, Default, Encode, Decode)]
-    #[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug))]
-    pub struct UncheckedExtrinsic(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
-    impl traits::Extrinsic for UncheckedExtrinsic {
-        fn is_signed(&self) -> Option<bool> {
-            None
-        }
-    }
-    /// Opaque block header type.
-    pub type Header =
-        generic::Header<BlockNumber, BlakeTwo256, generic::DigestItem<Hash, AuthorityId>>;
-    /// Opaque block type.
-    pub type Block = generic::Block<Header, UncheckedExtrinsic>;
-    /// Opaque block identifier type.
-    pub type BlockId = generic::BlockId<Block>;
-    /// Opaque session key type.
-    pub type SessionKey = AuthorityId;
-}
-
-/// This runtime version.
+/// Runtime version.
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-    spec_name: create_runtime_str!("edgeware"),
-    impl_name: create_runtime_str!("edgeware"),
-    authoring_version: 1,
-    spec_version: 1,
-    impl_version: 0,
+    spec_name: create_runtime_str!("node"),
+    impl_name: create_runtime_str!("substrate-node"),
+    authoring_version: 10,
+    spec_version: 11,
+    impl_version: 11,
     apis: RUNTIME_API_VERSIONS,
 };
 
-/// The version infromation used to identify this runtime when compiled natively.
-#[cfg(feature = "std")]
+/// Native version.
+#[cfg(any(feature = "std", test))]
 pub fn native_version() -> NativeVersion {
     NativeVersion {
         runtime_version: VERSION,
@@ -126,48 +102,42 @@ pub fn native_version() -> NativeVersion {
 }
 
 impl system::Trait for Runtime {
-    /// The identifier used to distinguish between accounts.
-    type AccountId = AccountId;
-    /// The index type for storing how many extrinsics an account has signed.
-    type Index = Nonce;
-    /// The index type for blocks.
-    type BlockNumber = BlockNumber;
-    /// The type for hashing blocks and tries.
-    type Hash = Hash;
-    /// The hashing algorithm used.
-    type Hashing = BlakeTwo256;
-    /// The header digest type.
-    type Digest = generic::Digest<Log>;
-    /// The header type.
-    type Header = generic::Header<BlockNumber, BlakeTwo256, Log>;
-    /// The ubiquitous event type.
-    type Event = Event;
-    /// The ubiquitous log type.
-    type Log = Log;
-    /// The ubiquitous origin type.
     type Origin = Origin;
+    type Index = Index;
+    type BlockNumber = BlockNumber;
+    type Hash = Hash;
+    type Hashing = BlakeTwo256;
+    type Digest = generic::Digest<Log>;
+    type AccountId = AccountId;
+    type Header = generic::Header<BlockNumber, BlakeTwo256, Log>;
+    type Event = Event;
+    type Log = Log;
 }
 
 impl aura::Trait for Runtime {
-    type HandleReport = ();
+    type HandleReport = aura::StakingSlasher<Runtime>;
+}
+
+impl balances::Trait for Runtime {
+    type Balance = Balance;
+    type AccountIndex = AccountIndex;
+    type OnFreeBalanceZero = ((Staking, Contract), Democracy);
+    type EnsureAccountLiquid = (Staking, Democracy);
+    type Event = Event;
 }
 
 impl consensus::Trait for Runtime {
-    /// The position in the block's extrinsics that the note-offline inherent must be placed.
-    const NOTE_OFFLINE_POSITION: u32 = 1;
-    /// The identifier we use to refer to authorities.
-    type SessionKey = AuthorityId;
-    // The aura module handles offline-reports internally
+    const NOTE_OFFLINE_POSITION: u32 = NOTE_OFFLINE_POSITION;
+    type Log = Log;
+    type SessionKey = SessionKey;
+
+    // the aura module handles offline-reports internally
     // rather than using an explicit report system.
     type InherentOfflineReport = ();
-    /// The ubiquitous log type.
-    type Log = Log;
 }
 
 impl timestamp::Trait for Runtime {
-    /// The position in the block's extrinsics that the timestamp-set inherent must be placed.
-    const TIMESTAMP_SET_POSITION: u32 = 0;
-    /// A timestamp: seconds since the unix epoch.
+    const TIMESTAMP_SET_POSITION: u32 = TIMESTAMP_SET_POSITION;
     type Moment = u64;
     type OnTimestampSet = Aura;
 }
@@ -182,28 +152,56 @@ impl Convert<AccountId, SessionKey> for SessionKeyConversion {
 
 impl session::Trait for Runtime {
     type ConvertAccountIdToSessionKey = SessionKeyConversion;
-    type OnSessionChange = ();
+    type OnSessionChange = (Staking, grandpa::SyncedAuthorities<Runtime>);
     type Event = Event;
 }
 
-impl balances::Trait for Runtime {
-    /// The type for recording an account's balance.
-    type Balance = u128;
-    /// The type for recording indexing into the account enumeration. If this ever overflows, there
-    /// will be problems!
-    type AccountIndex = u32;
-    /// What to do if an account's free balance gets zeroed.
-    type OnFreeBalanceZero = ();
-    /// Restrict whether an account can transfer funds. We don't place any further restrictions.
-    type EnsureAccountLiquid = ();
-    /// The uniquitous event type.
+impl staking::Trait for Runtime {
+    type OnRewardMinted = Treasury;
+    type Event = Event;
+}
+
+impl democracy::Trait for Runtime {
+    type Proposal = Call;
+    type Event = Event;
+}
+
+impl council::Trait for Runtime {
+    type Event = Event;
+}
+
+impl council::voting::Trait for Runtime {
+    type Event = Event;
+}
+
+impl council::motions::Trait for Runtime {
+    type Origin = Origin;
+    type Proposal = Call;
+    type Event = Event;
+}
+
+impl treasury::Trait for Runtime {
+    type ApproveOrigin = council_motions::EnsureMembers<_4>;
+    type RejectOrigin = council_motions::EnsureMembers<_2>;
+    type Event = Event;
+}
+
+impl contract::Trait for Runtime {
+    type Gas = u64;
+    type DetermineContractAddress = contract::SimpleAddressDeterminator<Runtime>;
     type Event = Event;
 }
 
 impl upgrade_key::Trait for Runtime {
-    /// The uniquitous event type.
     type Event = Event;
 }
+
+impl grandpa::Trait for Runtime {
+    type SessionKey = SessionKey;
+    type Log = Log;
+    type Event = Event;
+}
+
 impl identity::Trait for Runtime {
     /// The type for making a claim to an identity.
     type Claim = Vec<u8>;
@@ -222,50 +220,60 @@ impl governance::Trait for Runtime {
 }
 
 construct_runtime!(
-	pub enum Runtime with Log(InternalLog: DigestItem<Hash, AuthorityId>) where
-		Block = Block,
-		NodeBlock = opaque::Block,
-		InherentData = BasicInherentData
-	{
-		System: system::{default, Log(ChangesTrieRoot)},
-		Timestamp: timestamp::{Module, Call, Storage, Config<T>, Inherent},
-		Consensus: consensus::{Module, Call, Storage, Config<T>, Log(AuthoritiesChange), Inherent},
-		Aura: aura::{Module},
-		Balances: balances,
-		Session: session,
-		UpgradeKey: upgrade_key,
-		Identity: identity::{Module, Call, Storage, Config<T>, Event<T>},
-		Delegation: delegation::{Module, Call, Storage, Event<T>},
-		Governance: governance::{Module, Call, Storage, Event<T>},
-	}
+    pub enum Runtime with Log(InternalLog: DigestItem<Hash, SessionKey>) where
+        Block = Block,
+        NodeBlock = node_primitives::Block,
+        InherentData = BasicInherentData
+    {
+        System: system::{default, Log(ChangesTrieRoot)},
+        Aura: aura::{Module},
+        Timestamp: timestamp::{Module, Call, Storage, Config<T>, Inherent},
+        Consensus: consensus::{Module, Call, Storage, Config<T>, Log(AuthoritiesChange), Inherent},
+        Balances: balances,
+        Session: session,
+        Staking: staking,
+        Democracy: democracy,
+        Council: council::{Module, Call, Storage, Event<T>},
+        CouncilVoting: council_voting,
+        CouncilMotions: council_motions::{Module, Call, Storage, Event<T>, Origin},
+        CouncilSeats: council_seats::{Config<T>},
+        Grandpa: grandpa::{Module, Call, Storage, Config<T>, Log(), Event<T>},
+        Treasury: treasury,
+        Contract: contract::{Module, Call, Config<T>, Event<T>},
+        UpgradeKey: upgrade_key,
+
+        // EDGEWARE MODULES
+        Identity: identity::{Module, Call, Storage, Config<T>, Event<T>},
+        Delegation: delegation::{Module, Call, Storage, Event<T>},
+        Governance: governance::{Module, Call, Storage, Event<T>},
+    }
 );
 
-/// The type used as a helper for interpreting the sender of transactions.
-type Context = balances::ChainContext<Runtime>;
 /// The address format for describing accounts.
-type Address = balances::Address<Runtime>;
+pub type Address = balances::Address<Runtime>;
 /// Block header type as expected by this runtime.
 pub type Header = generic::Header<BlockNumber, BlakeTwo256, Log>;
 /// Block type as expected by this runtime.
 pub type Block = generic::Block<Header, UncheckedExtrinsic>;
+/// A Block signed with a Justification
+pub type SignedBlock = generic::SignedBlock<Block>;
 /// BlockId type as expected by this runtime.
 pub type BlockId = generic::BlockId<Block>;
 /// Unchecked extrinsic type as expected by this runtime.
-pub type UncheckedExtrinsic =
-    generic::UncheckedMortalExtrinsic<Address, Nonce, Call, Ed25519Signature>;
+pub type UncheckedExtrinsic = generic::UncheckedMortalExtrinsic<Address, Index, Call, Signature>;
 /// Extrinsic type that has already been checked.
-pub type CheckedExtrinsic = generic::CheckedExtrinsic<AccountId, Nonce, Call>;
+pub type CheckedExtrinsic = generic::CheckedExtrinsic<AccountId, Index, Call>;
 /// Executive: handles dispatch to the various modules.
-pub type Executive = executive::Executive<Runtime, Block, Context, Balances, AllModules>;
+pub type Executive =
+    executive::Executive<Runtime, Block, balances::ChainContext<Runtime>, Balances, AllModules>;
 
-// Implement our runtime API endpoints. This is just a bunch of proxying.
 impl_runtime_apis! {
-    impl runtime_api::Core<Block> for Runtime {
+    impl client_api::Core<Block> for Runtime {
         fn version() -> RuntimeVersion {
             VERSION
         }
 
-        fn authorities() -> Vec<AuthorityId> {
+        fn authorities() -> Vec<SessionKey> {
             Consensus::authorities()
         }
 
@@ -278,7 +286,7 @@ impl_runtime_apis! {
         }
     }
 
-    impl runtime_api::Metadata<Block> for Runtime {
+    impl client_api::Metadata<Block> for Runtime {
         fn metadata() -> OpaqueMetadata {
             Runtime::metadata().into()
         }
@@ -313,7 +321,26 @@ impl_runtime_apis! {
         }
 
         fn check_inherents(block: Block, data: BasicInherentData) -> Result<(), CheckInherentError> {
-            Runtime::check_inherents(block, data)
+            let expected_slot = data.aura_expected_slot;
+
+            // draw timestamp out from extrinsics.
+            let set_timestamp = block.extrinsics()
+                .get(TIMESTAMP_SET_POSITION as usize)
+                .and_then(|xt: &UncheckedExtrinsic| match xt.function {
+                    Call::Timestamp(TimestampCall::set(ref t)) => Some(t.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| CheckInherentError::Other("No valid timestamp in block.".into()))?;
+
+            // take the "worse" result of normal verification and the timestamp vs. seal
+            // check.
+            CheckInherentError::combine_results(
+                Runtime::check_inherents(block, data),
+                || {
+                    Aura::verify_inherent(set_timestamp.into(), expected_slot)
+                        .map_err(|s| CheckInherentError::Other(s.into()))
+                },
+            )
         }
 
         fn random_seed() -> <Block as BlockT>::Hash {
@@ -321,9 +348,29 @@ impl_runtime_apis! {
         }
     }
 
-    impl runtime_api::TaggedTransactionQueue<Block> for Runtime {
+    impl client_api::TaggedTransactionQueue<Block> for Runtime {
         fn validate_transaction(tx: <Block as BlockT>::Extrinsic) -> TransactionValidity {
             Executive::validate_transaction(tx)
+        }
+    }
+
+    impl fg_primitives::GrandpaApi<Block> for Runtime {
+        fn grandpa_pending_change(digest: DigestFor<Block>)
+            -> Option<ScheduledChange<NumberFor<Block>>>
+        {
+            for log in digest.logs.iter().filter_map(|l| match l {
+                Log(InternalLog::grandpa(grandpa_signal)) => Some(grandpa_signal),
+                _=> None
+            }) {
+                if let Some(change) = Grandpa::scrape_digest_change(log) {
+                    return Some(change);
+                }
+            }
+            None
+        }
+
+        fn grandpa_authorities() -> Vec<(SessionKey, u64)> {
+            Grandpa::grandpa_authorities()
         }
     }
 

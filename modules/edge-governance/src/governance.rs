@@ -22,21 +22,20 @@ extern crate serde;
 // We only implement the serde traits for std builds - they're unneeded
 // in the wasm runtime.
 #[cfg(feature = "std")]
-
 extern crate parity_codec as codec;
-extern crate substrate_primitives as primitives;
+extern crate sr_io as runtime_io;
+extern crate sr_primitives as runtime_primitives;
 extern crate sr_std as rstd;
 extern crate srml_support as runtime_support;
-extern crate sr_primitives as runtime_primitives;
-extern crate sr_io as runtime_io;
 extern crate srml_system as system;
+extern crate substrate_primitives as primitives;
 
-use rstd::prelude::*;
-use system::ensure_signed;
-use runtime_support::{StorageValue, StorageMap, Parameter};
-use runtime_support::dispatch::Result;
-use runtime_primitives::traits::Hash;
 use codec::Encode;
+use rstd::prelude::*;
+use runtime_primitives::traits::Hash;
+use runtime_support::dispatch::Result;
+use runtime_support::{Parameter, StorageMap, StorageValue};
+use system::ensure_signed;
 
 #[cfg_attr(feature = "std", derive(Debug))]
 #[derive(Encode, Decode, PartialEq, Clone, Copy)]
@@ -74,7 +73,7 @@ pub trait Trait: system::Trait {
 
 decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-        fn deposit_event() = default;
+        fn deposit_event<T>() = default;
 
         pub fn create_proposal(origin, title: Vec<u8>, contents: Vec<u8>, category: ProposalCategory) -> Result {
             let _sender = ensure_signed(origin)?;

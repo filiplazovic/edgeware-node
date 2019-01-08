@@ -73,16 +73,10 @@ pub struct IdentityRecord<AccountId, BlockNumber> {
 
 decl_module! {
     pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-        fn deposit_event() = default;
+        fn deposit_event<T>() = default;
 
-        /// Register an identity with the hash of the signature. Ensures that
-        /// all identities are unique, so that no duplicate identities can be
-        /// registered.
-        ///
-        /// Current implementation suffers from squatter attacks. Additional
-        /// implementations could provide a mechanism for a trusted set of
-        /// authorities to delete a squatted identity OR implement storage
-        /// rent to disincentivize it.
+        /// Register an identity. Ensures that all identities are
+        /// unique, so that no duplicate identities can be registered.
         pub fn register(origin, identity: Vec<u8>) -> Result {
             let _sender = ensure_signed(origin)?;
             let hash = T::Hashing::hash_of(&identity);
@@ -141,7 +135,7 @@ decl_module! {
         }
 
         /// Verify an existing identity based on its attested proof. Sender
-        /// be specified on the pre-selected list of verifiers.
+        /// must be specified on the pre-selected list of verifiers.
         pub fn verify(origin, identity_hash: T::Hash) -> Result {
             let _sender = ensure_signed(origin)?;
             ensure!(Self::verifiers().contains(&_sender), "Sender not a verifier");
