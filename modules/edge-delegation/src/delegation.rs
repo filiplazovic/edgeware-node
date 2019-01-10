@@ -36,10 +36,30 @@ extern crate srml_system as system;
 
 use rstd::prelude::*;
 use system::ensure_signed;
-use runtime_support::{StorageValue, StorageMap, Parameter};
+use runtime_support::{StorageValue, StorageMap};
 use runtime_support::dispatch::Result;
 
-pub trait Trait: balances::Trait {
+// TODO: move this into trait
+type VoteId = u32;
+
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Encode, Decode, PartialEq)]
+pub struct VotingResults {
+	pub yes: u32,
+	pub no: u32,
+}
+
+#[cfg_attr(feature = "std", derive(Debug))]
+#[derive(Encode, Decode, PartialEq)]
+pub struct VotingRecord<AccountId> {
+	pub id: VoteId,
+	pub completed: bool,
+	pub voted: Vec<AccountId>,
+	pub delegated: Vec<AccountId>,
+	pub results: Option<VotingResults>,
+}
+
+pub trait Trait: system::Trait {
 	/// The overarching event type.
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
@@ -48,72 +68,159 @@ decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 		fn deposit_event() = default;
 
-		pub fn delegate_to(origin, to: T::AccountId) -> Result {
+		/// Submit a vote, overwriting old votes and delegations if found.
+		pub fn vote(origin, id: VoteId, vote: bool) -> Result {
 			let _sender = ensure_signed(origin)?;
-			// Check that no delegation cycle exists
-			ensure!(!Self::has_delegation_cycle(&_sender, to.clone()), "Invalid delegation");
-			// Update the delegate to Some(delegate)
-			<DelegatesOf<T>>::insert(&_sender, &to);
-			// Fire delegation event
-			Self::deposit_event(RawEvent::Delegated(_sender, to));
+			let mut record = <Votes<T>>::get(&id).ok_or("Vote does not exist")?;
+			ensure!(!record.completed, "Vote already completed");
+			Self::undelegate_if_exists(&mut record, &_sender);
 
+			// add to voters if not already voted
+			if !record.voted.contains(&_sender) {
+				record.voted.push(_sender.clone());
+				Self::deposit_event(RawEvent::Voted(id, _sender.clone(), vote));
+			} else {
+				// TODO: prevent updating to same position?
+				Self::deposit_event(RawEvent::VoteUpdated(id, _sender.clone(), vote));
+			}
+			<VoteOf<T>>::insert((id, _sender), vote);
+			<Votes<T>>::insert(id, record);
 			Ok(())
 		}
 
-		pub fn undelegate_from(origin, from: T::AccountId) -> Result {
+		pub fn unvote(origin, id: VoteId) -> Result {
 			let _sender = ensure_signed(origin)?;
-			// Check sender is not delegating to itself
-			ensure!(_sender != from, "Invalid undelegation");
-			// Update the delegate to the sender, None type throws an error due to missing Trait bound
-			<DelegatesOf<T>>::remove(&_sender);
-			// Fire delegation event
-			Self::deposit_event(RawEvent::Undelegated(_sender, from));
+			let mut record = <Votes<T>>::get(&id).ok_or("Vote does not exist")?;
+			ensure!(!record.completed, "Vote already completed");
+			Self::unvote_if_exists(&mut record, &_sender);
+			Ok(())
+		}
 
+		pub fn delegate(origin, id: VoteId, to: T::AccountId) -> Result {
+			let _sender = ensure_signed(origin)?;
+			let mut record = <Votes<T>>::get(&id).ok_or("Vote does not exist")?;
+			ensure!(!record.completed, "Vote already completed");
+			ensure!(!Self::has_delegation_cycle(id, &_sender, to.clone()), "Invalid delegation");
+			Self::unvote_if_exists(&mut record, &_sender);
+
+			// add to delegates if not already delegated
+			if !record.delegated.contains(&_sender) {
+				record.delegated.push(_sender.clone());
+				Self::deposit_event(RawEvent::Delegated(id, _sender.clone(), to.clone()));
+			} else {
+				Self::deposit_event(RawEvent::DelegationUpdated(id, _sender.clone(), to.clone()));
+			}
+			<DelegateOf<T>>::insert((id, _sender), to);
+			<Votes<T>>::insert(id, record);
+			Ok(())
+		}
+
+		pub fn undelegate(origin, id: VoteId) -> Result {
+			let _sender = ensure_signed(origin)?;
+			let mut record = <Votes<T>>::get(&id).ok_or("Vote does not exist")?;
+			ensure!(!record.completed, "Vote already completed");
+			Self::undelegate_if_exists(&mut record, &_sender);
 			Ok(())
 		}
 	}
 }
 
 impl<T: Trait> Module<T> {
-	/// Implement rudimentary DFS to find if "to"'s delegation ever leads to "from"
-	pub fn has_delegation_cycle(from: &T::AccountId, to: T::AccountId) -> bool {
+	pub fn create_vote() -> VoteId {
+		let id = <NumVotes<T>>::get();
+		<NumVotes<T>>::mutate(|i| *i += 1);
+		<Votes<T>>::insert(id, VotingRecord {
+			id: id,
+			completed: false,
+			voted: vec![],
+			delegated: vec![],
+			results: None,
+		});
+		return id;
+	}
+
+	fn unvote_if_exists(vote: &mut VotingRecord<T::AccountId>, who: &T::AccountId) {
+		if let Some(i) = &vote.voted.iter().position(|ref s| s == &who) {
+			vote.voted.swap_remove(*i);
+			<VoteOf<T>>::remove((vote.id, who.clone()));
+			Self::deposit_event(RawEvent::Unvoted(vote.id, who.clone()));
+		}
+	}
+
+	fn undelegate_if_exists(vote: &mut VotingRecord<T::AccountId>, who: &T::AccountId) {
+		if let Some(i) = &vote.delegated.iter().position(|ref s| s == &who) {
+			vote.delegated.swap_remove(*i);
+			<DelegateOf<T>>::remove((vote.id, who.clone()));
+			Self::deposit_event(RawEvent::Undelegated(vote.id, who.clone()));
+		}
+	}
+
+	/// Implement rudimentary DFS to find if "to"'s delegation ever leads to "from"	
+	fn has_delegation_cycle(id: VoteId, from: &T::AccountId, to: T::AccountId) -> bool {
 		// Loop over delegation path of "to" to check if "from" exists
 		if from == &to {
 			return true;
 		}
-		match Self::delegate_of(&to) {
-			Some(delegate) => Self::has_delegation_cycle(from, delegate),
+		match Self::delegate_of((id, to)) {
+			Some(delegate) => Self::has_delegation_cycle(id, from, delegate),
 			None => false,
 		}
 	}
 
 	/// Get the last node at the end of a delegation path for a given account
-	pub fn get_sink_delegator(start: T::AccountId) -> T::AccountId {
-		match Self::delegate_of(&start) {
-			Some(delegate) => Self::get_sink_delegator(delegate),
+	fn get_sink_delegator(id: VoteId, start: T::AccountId) -> T::AccountId {
+		match Self::delegate_of((id, start.clone())) {
+			Some(delegate) => Self::get_sink_delegator(id, delegate),
 			None => start,
 		}
 	}
 
-	/// Tallies the "sink" delegators along a delegation path for each account
-	pub fn tally_delegation(accounts: Vec<T::AccountId>) -> Vec<(T::AccountId, T::AccountId)> {
-		accounts.into_iter()
-			.map(|a| (a.clone(), Self::get_sink_delegator(a)))
-			.collect()
+	pub fn complete_vote(id: VoteId) -> Result {
+		let record = <Votes<T>>::get(&id).ok_or("Vote does not exist")?;
+		ensure!(!record.completed, "Vote already completed");
+		
+		// accumulate results via fold, resolving delegations as we go
+		let fold_fn = |r: VotingResults, v: &T::AccountId| {
+			match Self::vote_of((id, Self::get_sink_delegator(id, v.clone()))) {
+				Some(true) => VotingResults { yes: r.yes + 1, no: r.no },
+				Some(false) => VotingResults { yes: r.yes, no: r.no + 1 },
+				None => r,
+			}
+		};
+		let zero_result = VotingResults { yes: 0, no: 0 };
+		let delegate_results = record.delegated.iter().fold(zero_result, fold_fn);
+		let results = record.voted.iter().fold(delegate_results, fold_fn);
+		// TODO: clean up DelegateOf/VoteOf maps?
+		<Votes<T>>::insert(id, VotingRecord {
+			results: Some(results),
+			..record
+		});
+		Self::deposit_event(RawEvent::VoteCompleted(id));
+		Ok(())
 	}
 }
 
 /// An event in this module.
 decl_event!(
 	pub enum Event<T> where <T as system::Trait>::AccountId {
-		Delegated(AccountId, AccountId),
-		Undelegated(AccountId, AccountId),
+		VoteCreated(VoteId),
+		Voted(VoteId, AccountId, bool),
+		VoteUpdated(VoteId, AccountId, bool),
+		Unvoted(VoteId, AccountId),
+		Delegated(VoteId, AccountId, AccountId),
+		DelegationUpdated(VoteId, AccountId, AccountId),
+		Undelegated(VoteId, AccountId),
+		VoteCompleted(VoteId),
 	}
 );
 
 decl_storage! {
 	trait Store for Module<T: Trait> as Delegation {
+		/// The number of votes held thus far.
+		pub NumVotes get(num_votes): VoteId;
+		pub Votes get(votes): map VoteId => Option<VotingRecord<T::AccountId>>;
 		/// The map of strict delegates for each account
-		pub DelegatesOf get(delegate_of): map T::AccountId => Option<T::AccountId>;
+		pub DelegateOf get(delegate_of): map (VoteId, T::AccountId) => Option<T::AccountId>;
+		pub VoteOf get(vote_of): map (VoteId, T::AccountId) => Option<bool>;
 	}
 }
