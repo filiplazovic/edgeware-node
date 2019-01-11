@@ -590,8 +590,15 @@ mod tests {
 			System::set_block_number(3);
 
 			let new_identity: &[u8] = b"github.com/drstone";
+			let new_hash = BlakeTwo256::hash_of(&new_identity.to_vec());
+
 			assert_err!(
 				register_identity(public, new_identity),
+				"Sender account is frozen"
+			);
+
+			assert_err!(
+				attest_to_identity(public, new_hash, b"test"),
 				"Sender account is frozen"
 			)
 		});
